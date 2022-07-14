@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: My ECS stack.
+Parameters:
+  Stage:
+    Description: Stage type
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+  ContainerMemory:
+    Description: Memory for the fargate Task
+    Type: Number
+    Default: 2048
+  ContainerCpu:
+    Description: Cpu for the fargate task
+    Type: Number
+    Default: 1024
+  VPCID:
+    Description: Id of and existing Development VPC
+    Type: "AWS::EC2::VPC::Id"
+    ConstraintDescription: Must be a valid VPC.
+  SubnetId1:
+    Description: "Private subnet for confidential apps "
+    Type: "AWS::EC2::Subnet::Id"
+    MinLength: "1"
+    MaxLength: "255"
+    ConstraintDescription: Must be a valid Private Subnet.
+  SubnetId2:
+    Description: "Private subnet for confidential apps "
+    Type: "AWS::EC2::Subnet::Id"
+    MinLength: "1"
+    MaxLength: "255"
+    ConstraintDescription: Must be a valid Private Subnet.
+  SubnetId3:
+    Description: "Private subnet for confidential apps "
+    Type: "AWS::EC2::Subnet::Id"
+    MinLength: "1"
+    MaxLength: "255"
+  CloudWatchLogRetain:
+    Description: Code Build Timeout in Minutes
+    Type: Number
+    Default: 90
+    MinValue: 1
+    MaxValue: 3653
+  MyECRRepo:
+    Description: ECR repository
+    Type: String
+    Default: "my-service"
+
+Resources:
+  MyServiceECSCluster:
+    Type: "AWS::ECS::Cluster"
+    Properties:
+      ClusterName: !Sub My-service-${Stage}-ecs-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  MyServiceECSRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub My-service-${Stage}-MyServiceECSRole
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/PermissionBoundary-DevOps"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ecs-tasks.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub My-service-${Stage}-MyServiceECSPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                  - ssm:GetParametersByPath
+                  - ecs:RunTask
+                Resource: "*"
+      Path: "/"
+
+  MyServiceECSTaskExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "MyService-${Stage}-Task-ExecutionRole"
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/PermissionBoundary-DevOps"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ecs-tasks.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub My-service-${Stage}-MyServiceTaskExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogGroups
+                Resource: "*"
+      Path: "/"
+
+  MyServiceCloudWatchEventRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "My-${Stage}-Service-CloudWatchEventRole"
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/PermissionBoundary-DevOps"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "events.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub My-service-${Stage}-MyServiceECSTaskExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                Resource: !Ref MyServiceEcsTaskDefinition
+        - PolicyName: !Sub My-service-${Stage}-MyServiceECSTaskExecutionIAMPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: "*"
+      Path: "/"
+    DependsOn:
+      - MyServiceEcsTaskDefinition
+
+  MyServiceEcsLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub My-service-${Stage}-task-LogsGroup
+      RetentionInDays: !Ref CloudWatchLogRetain
+
+  MyServiceFargateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Fargate Security Group
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.0.0.0/8
+
+  MyServiceEcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: !Ref ContainerCpu
+      Memory: !Ref ContainerMemory
+      ExecutionRoleArn: !GetAtt
+        - MyServiceECSTaskExecutionRole
+        - Arn
+      Family: !Sub My-service-${Stage}-task-definition
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      TaskRoleArn: !GetAtt MyServiceECSRole.Arn
+      ContainerDefinitions:
+        - Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${MyServiceECRRepo}:latest"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref MyServiceEcsLogsGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: ecs
+          Name: !Sub My-service-${Stage}-MyServiceTaskContainer
+          Memory: !Ref ContainerMemory
+          Cpu: !Ref ContainerCpu
+          Environment:
+            - Name: ENV
+              Value: !Ref Stage
+          PortMappings:
+            - { ContainerPort: 80 }
+    DependsOn:
+      - MyServiceECRRepo
+
+  MyServiceScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Schedule rule for My Service"
+      Name: !Sub My-service-task-schedule-rule-${Stage}
+      State: ENABLED
+      ScheduleExpression: cron(0/45 06-18 ? * FRI *)
+      Targets:
+        - Arn: !GetAtt MyServiceECSCluster.Arn
+          Id: ScheduledTask
+          RoleArn: !GetAtt MyServiceCloudWatchEventRole.Arn
+          Input: !Sub '{ "containerOverrides": [{"name": "My-service-${Stage}-MyServiceTaskContainer", "environment": [{"name":"APPLICATION_ENV","value":"${Stage}"},{"name":"DB_URL","value":"jdbc:mysql://sysco-canada-dev.conhpk6ybl0e.us-east-1.rds.amazonaws.com:3306/customer_web_interface?serverTimezone=UTC"},{"name":"DB_USERNAME","value":"root"},{"name":"DB_PASSWORD","value":"RqfR73RQj2qft"},{"name":"My_AUTH_URL","value":"https://demo-api-eccnetservices.Myca.org/oauth/token"},{"name":"My_AUTH_GRANT_TYPE","value":"password"},{"name":"My_AUTH_REFRESH_TOKEN_GRANT_TYPE","value":"refresh_token"},{"name":"My_AUTH_USERNAME","value":"obapi.demo@Sysco.ca"},{"name":"My_AUTH_PASSWORD","value":"2zxB5MS2GW2xgAkr"},{"name":"My_AUTH_SCOPE","value":"basic"},{"name":"My_AUTH_CLIENT_ID","value":"syscocddemo"},{"name":"My_AUTH_CLIENT_SECRET","value":"30E451BE-4D71-41C8-9E93-2FA3B55DA899"},{"name":"My_API_URL","value":"https://demo-api-contentdistribution.Myca.org/api"},{"name":"My_PRODUCT_KEYS_PULL_LIMIT","value":"1000"},{"name":"THREAD_COUNT","value":"2"}]}]}'
+          EcsParameters:
+            TaskDefinitionArn: !Ref MyServiceEcsTaskDefinition
+            LaunchType: FARGATE
+            NetworkConfiguration:
+              AwsVpcConfiguration:
+                AssignPublicIp: DISABLED
+                SecurityGroups:
+                  - !Ref MyServiceFargateSecurityGroup
+                Subnets:
+                  - !Ref SubnetId1
+                  - !Ref SubnetId2
+                  - !Ref SubnetId3
